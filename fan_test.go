@@ -108,7 +108,7 @@ func TestMakeFanIn(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			out, stop := MakeFanIn(tt.outCap, tt.chs()...)
 			tt.post(t, out, stop)
-			goleak.VerifyNone(t)
+			goleak.VerifyNone(t, goleak.IgnoreTopFunction("time.Sleep"))
 		})
 	}
 

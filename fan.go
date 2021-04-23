@@ -1,7 +1,6 @@
 package chops
 
 import (
-	"log"
 	"reflect"
 )
 
@@ -28,51 +27,59 @@ func MakeFanIn(outCap int, chs ...interface{}) (out chan interface{}, stop chan 
 		out = make(chan interface{}, outCap)
 		stop = make(chan struct{})
 		go func() {
+			defer close(out)
 			for {
 				select {
 				case <-stop:
-					break
+					return
 				case v, ok := <-ch:
-					if ok {
-						out <- v
-						continue
-					} else {
-						break
+					if !ok {
+						return
 					}
+					out <- v
 				}
-				close(out)
-				return
 			}
 		}()
 		return
 	}
 
-	cases := make([]reflect.SelectCase, len(chs))
+	out = make(chan interface{}, outCap)
+	stop = make(chan struct{}, 1)
+
+	cases := make([]reflect.SelectCase, len(chs)+1)
 	for i, ifacev := range chs {
 		cases[i] = reflect.SelectCase{
 			Chan: assertChanValue(ifacev),
 			Dir:  reflect.SelectRecv,
 		}
 	}
-	out = make(chan interface{}, outCap)
-	stop = make(chan struct{}, 1)
-	remaining := len(cases)
+	cases[len(cases)-1] = reflect.SelectCase{
+		Chan: assertChanValue(stop),
+		Dir:  reflect.SelectRecv,
+	}
 
-	go RecvOr(stop, func() {
-		chosen, recv, ok := reflect.Select(cases)
-		if ok {
-			out <- recv.Interface()
-		} else if remaining == 1 {
-			// stop RecvOr
-			s := TrySend(stop, struct{}{})
-			log.Printf("TrySend: %v", s)
-			close(out)
-		} else {
-			// avoids slice buffer reallocation
-			cases[chosen].Chan = reflect.Value{}
-			remaining--
+	go func() {
+		defer close(out)
+		// don't count stop case
+		remaining := len(chs)
+
+		for {
+			chosen, recv, ok := reflect.Select(cases)
+			if chosen == len(cases)-1 && !ok {
+				// stop channel was closed
+				return
+			} else if ok {
+				out <- recv.Interface()
+			} else if remaining == 1 {
+				// last one to leave turns out the lights
+				return
+			} else {
+				// avoids slice buffer reallocation
+				cases[chosen].Chan = reflect.Value{}
+				remaining--
+			}
 		}
-	})
+	}()
 
 	return
 }
