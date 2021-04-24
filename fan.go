@@ -118,7 +118,9 @@ func MakeFanOut(n int, outCap int, ch interface{}) []chan interface{} {
 		out[i] = make(chan interface{}, outCap)
 	}
 
-	go func() {
+	go func(v reflect.Value, out []chan interface{}) {
+		// This will stall if goroutines are blocked up
+		// Solution is to increase outCap?
 		for {
 			x, ok := v.Recv()
 			if ok {
@@ -132,7 +134,7 @@ func MakeFanOut(n int, outCap int, ch interface{}) []chan interface{} {
 				return
 			}
 		}
-	}()
+	}(v, out)
 
 	return out
 }
