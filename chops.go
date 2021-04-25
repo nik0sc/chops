@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -167,12 +168,8 @@ func TryClose(ch interface{}) (ok bool) {
 func IsClosed(ch interface{}) bool {
 	assertChanValue(ch)
 	ifaceh := (*ifaceChan)(unsafe.Pointer(&ch))
-	// This is technically wrong since channels have a mutex
-	// within them to protect access. But closed never goes
-	// from 1 back to 0, and we have some warnings in the
-	// documentation about relying on false result (could be
-	// the result of a dirty read).
-	return ifaceh.data.closed == 1
+	// See the start of runtime.chanrecv for more details
+	return atomic.LoadUint32(&ifaceh.data.closed) == 1
 }
 
 // RecvOr attempts a non-blocking receive on a channel. It
@@ -203,17 +200,31 @@ func RecvOr(ch interface{}, f func()) (interface{}, bool) {
 // until the send succeeds. SendOr returns true if the send
 // eventually succeeds, or false if the channel is closed.
 //
+// If x's underlying type is a function that accepts no
+// arguments and returns exactly one result whose type can
+// be sent on ch, then x will be called every time ch can be
+// sent on and the result is sent instead. Effectively, this
+// behaves like `ch <- x()`.
+//
 // Use this instead of TrySend in tight loops to avoid the
 // overhead of boxing channels to interfaces in every loop
 // iteration.
 func SendOr(ch interface{}, x interface{}, f func()) (ok bool) {
 	v := assertChanValue(ch)
 	xt := reflect.TypeOf(x)
-	if !xt.AssignableTo(v.Type().Elem()) {
+	var xv, xf reflect.Value
+
+	if xt.Kind() == reflect.Func &&
+		xt.NumIn() == 0 &&
+		xt.NumOut() == 1 &&
+		xt.Out(0).AssignableTo(v.Type().Elem()) {
+		xf = reflect.ValueOf(x)
+	} else if !xt.AssignableTo(v.Type().Elem()) {
 		panic(fmt.Sprintf("cannot send %T on %T", x, ch))
+	} else {
+		xv = reflect.ValueOf(x)
 	}
 
-	xv := reflect.ValueOf(x)
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -226,12 +237,26 @@ func SendOr(ch interface{}, x interface{}, f func()) (ok bool) {
 			panic(r)
 		}
 	}()
-	for {
-		ok = v.TrySend(xv)
-		if ok {
-			break
+
+	if xf.IsValid() {
+		for {
+			ok = v.TrySend(xf.Call(nil)[0])
+			if ok {
+				break
+			}
+			f()
 		}
-		f()
+	} else if xv.IsValid() {
+		for {
+			ok = v.TrySend(xv)
+			if ok {
+				break
+			}
+			f()
+		}
+	} else {
+		panic("unreachable: neither xf nor xv is valid")
 	}
+
 	return
 }
